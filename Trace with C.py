@@ -3,14 +3,6 @@ import time
 import json
 import subprocess
 
-# READ DATA
-# while True:
-#     print('''
-#           1. Start Recording - F2
-#           2. Stop Recording - F3
-#           3. Start Action - F4
-#           4. Stop Action - F5''')
-#     oke = oke
 
 key_a = keyboard.Key.f4 #Start Recording
 key_b = keyboard.Key.f5 #Stop Recording
