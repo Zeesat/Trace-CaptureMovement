@@ -84,120 +84,169 @@ def compile():
     data_join = data_keyboard_down + data_keyboard_up + data_mouse
     data_sorted = sorted(data_join, key=lambda x: x[2])
 
-    code_C = r'''#include <windows.h>
-    #include <stdio.h>
+    code_C_mouse = r'''
+#include <windows.h>
+#include <stdio.h>
 
-    typedef LONG NTSTATUS;
-    typedef NTSTATUS (WINAPI *NtDelayExecution_t)(BOOL Alertable, PLARGE_INTEGER DelayInterval);
+// =========================
+//  MOUSE-ONLY REPLAY ENGINE
+// =========================
+// Format mengikuti file yang kamu kirim, tetapi TANPA keyboard.
+// Tinggal tempel timeline mouse hasil parsing-mu ke dalam main().
 
-    // High precision sleep (NtDelayExecution)
-    void sleep_until_ns(long long target_ns) {
-        static long long current_ns = 0;
-        static NtDelayExecution_t NtDelayExecution = NULL;
+// High precision sleep (NtDelayExecution)
+typedef LONG NTSTATUS;
+typedef NTSTATUS (WINAPI *NtDelayExecution_t)(BOOL Alertable, PLARGE_INTEGER DelayInterval);
 
-        if (!NtDelayExecution) {
-            NtDelayExecution = (NtDelayExecution_t)
-                GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtDelayExecution");
-        }
+void sleep_until_ns(long long target_ns) {
+    static long long current_ns = 0;
+    static NtDelayExecution_t NtDelayExecution = NULL;
 
-        long long delta_ns = target_ns - current_ns;
-        if (delta_ns > 0) {
-            LARGE_INTEGER interval;
-            interval.QuadPart = - (delta_ns / 100);  // convert ns → 100ns units (negative=relative)
-            NtDelayExecution(FALSE, &interval);
-        }
-
-        current_ns = target_ns;
+    if (!NtDelayExecution) {
+        NtDelayExecution = (NtDelayExecution_t)
+            GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtDelayExecution");
     }
 
-    void key_evt(int vk, int isUp) {
-        INPUT in = {0};
-        in.type = INPUT_KEYBOARD;
-        in.ki.wVk = vk;
-        in.ki.dwFlags = isUp ? KEYEVENTF_KEYUP : 0;
-        SendInput(1, &in, sizeof(INPUT));
+    long long delta_ns = target_ns - current_ns;
+    if (delta_ns > 0) {
+        LARGE_INTEGER interval;
+        interval.QuadPart = - (delta_ns / 100);  // ns → 100ns units
+        NtDelayExecution(FALSE, &interval);
     }
-    void mouse_move(int x, int y) {
+    current_ns = target_ns;
+}
+
+// =========================
+// MOUSE FUNCTIONS
+// =========================
+
+void mouse_move(int x, int y) {
     INPUT in = {0};
     in.type = INPUT_MOUSE;
     in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
     in.mi.dx = (x * 65535) / GetSystemMetrics(SM_CXSCREEN);
     in.mi.dy = (y * 65535) / GetSystemMetrics(SM_CYSCREEN);
     SendInput(1, &in, sizeof(INPUT));
-    }
+}
 
-    void mouse_click_down(int event) {
-        INPUT in = {0};
-        in.type = INPUT_MOUSE;
+void mouse_click_down(int event) {
+    INPUT in = {0};
+    in.type = INPUT_MOUSE;
 
-        if (event == 100)      in.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-        else if (event == 101) in.mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
-        else if (event == 102) in.mi.dwFlags = MOUSEEVENTF_MIDDLEDOWN;
+    if (event == 100)      in.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    else if (event == 101) in.mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
+    else if (event == 102) in.mi.dwFlags = MOUSEEVENTF_MIDDLEDOWN;
 
-        SendInput(1, &in, sizeof(INPUT));
-    }
+    SendInput(1, &in, sizeof(INPUT));
+}
 
-    void mouse_click_up(int event) {
-        INPUT in = {0};
-        in.type = INPUT_MOUSE;
+void mouse_click_up(int event) {
+    INPUT in = {0};
+    in.type = INPUT_MOUSE;
 
-        if (event == 100)      in.mi.dwFlags = MOUSEEVENTF_LEFTUP;
-        else if (event == 101) in.mi.dwFlags = MOUSEEVENTF_RIGHTUP;
-        else if (event == 102) in.mi.dwFlags = MOUSEEVENTF_MIDDLEUP;
+    if (event == 100)      in.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    else if (event == 101) in.mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+    else if (event == 102) in.mi.dwFlags = MOUSEEVENTF_MIDDLEUP;
 
-        SendInput(1, &in, sizeof(INPUT));
-    }
+    SendInput(1, &in, sizeof(INPUT));
+}
 
-    void mouse_scroll(int amount) {
-        INPUT in = {0};
-        in.type = INPUT_MOUSE;
-        in.mi.dwFlags = MOUSEEVENTF_WHEEL;
-        in.mi.mouseData = amount;
-        SendInput(1, &in, sizeof(INPUT));
-    }
+void mouse_scroll(int amount) {
+    INPUT in = {0};
+    in.type = INPUT_MOUSE;
+    in.mi.dwFlags = MOUSEEVENTF_WHEEL;
+    in.mi.mouseData = amount;
+    SendInput(1, &in, sizeof(INPUT));
+}
 
-    int main() {
-        // =========================
-        // STATIC TIMELINE (ns)
-        // =========================
+// =========================
+// MAIN (ISI TIMELINE DI SINI)
+// =========================
 
+int main() {
 
     '''
-    with open("CTraceOutputKMGPT.c", "w", encoding="utf-8") as write_code:
-        write_code.write(code_C)
+    with open("CTraceOutputMGPT.c", "w", encoding="utf-8") as write_code_m:
+        write_code_m.write(code_C_mouse)
+
+    code_C_keyboard = r'''
+#include <windows.h>
+#include <stdio.h>
+
+typedef LONG NTSTATUS;
+typedef NTSTATUS (WINAPI *NtDelayExecution_t)(BOOL Alertable, PLARGE_INTEGER DelayInterval);
+
+// High precision sleep (NtDelayExecution)
+void sleep_until_ns(long long target_ns) {
+    static long long current_ns = 0;
+    static NtDelayExecution_t NtDelayExecution = NULL;
+
+    if (!NtDelayExecution) {
+        NtDelayExecution = (NtDelayExecution_t)
+            GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtDelayExecution");
+    }
+
+    long long delta_ns = target_ns - current_ns;
+    if (delta_ns > 0) {
+        LARGE_INTEGER interval;
+        interval.QuadPart = - (delta_ns / 100);  // convert ns → 100ns units (negative=relative)
+        NtDelayExecution(FALSE, &interval);
+    }
+
+    current_ns = target_ns;
+}
+
+void key_evt(int vk, int isUp) {
+    INPUT in = {0};
+    in.type = INPUT_KEYBOARD;
+    in.ki.wScan = MapVirtualKey(vk, MAPVK_VK_TO_VSC);
+    in.ki.dwFlags = KEYEVENTF_SCANCODE | (isUp ? KEYEVENTF_KEYUP : 0);
+    SendInput(1, &in, sizeof(INPUT));
+}
+
+int main() {
+    // =========================
+    // STATIC TIMELINE (ns)
+    // =========================
+
+'''
+    with open("CTraceOutputKGPT.c","w", encoding="utf-8") as write_code_k:
+        write_code_k.write(code_C_keyboard)
+
 
     #  format C:   sleep_until_ns(8525331900LL);  key_evt(68,  1);
     #  format C:   sleep_until_ns(1290400LL);  mouse_move(382, 259);
-    with open("CTraceOutputKMGPT.c", "a", encoding="utf-8") as append_code:
+    with open("CTraceOutputKGPT.c", "a", encoding="utf-8") as k_code, \
+        open("CTraceOutputMGPT.c", "a", encoding="utf-8") as m_code:
         for action in data_sorted:
             if action[0] == "keyboard":
-                C_action = f"   sleep_until_ns({action[2]}LL);  key_evt({action[1]},  {action[3]});\n"
-            else: 
-                if not mouse_on:
-                    continue
+                C_action = f'''   sleep_until_ns({action[2]}LL);  key_evt({action[1]},  {action[3]});\n'''
+                k_code.write(C_action)
+                continue
+            if action[0] == "mouse": 
                 if action[1] == "mouse_move":
                     C_action = f"   sleep_until_ns({action[2]}LL);  {action[1]}({action[3]}, {action[4]});\n"
                 elif action[1] == "mouse_scroll":
-                    C_action = f"   sleep_until_ns({action[2]}LL);  {action[1]}({action[4]});\n"
+                    C_action = f"   sleep_until_ns({action[2]}LL);  {action[1]}({action[3]});\n"
                 else:
                     C_action = f"   sleep_until_ns({action[2]}LL);  {action[1]}({action[5]});\n"
-            append_code.write(C_action)
-
-
-
+                m_code.write(C_action)
     code_C_close = '''
         return 0;
     }
     '''
-    with open("CTraceOutputKMGPT.c", "a", encoding="utf-8") as close_code:
-        close_code.write(code_C_close)
+    with open("CTraceOutputKGPT.c", "a", encoding="utf-8") as k_close, \
+    open("CTraceOutputMGPT.c", "a", encoding="utf-8") as m_close:
+        k_close.write(code_C_close)
+        m_close.write(code_C_close)
 
     # [{"Key":"65","Start":3050367400,"Hold":933969400},
     # {"Key":"160","Start":1551421000,"Hold":3498006900},
     # {"Key":"83","Start":6349526300,"Hold":735409600},
     # {"Key":"68","Start":7856364800,"Hold":668967100}]
 
-    subprocess.run(["gcc", "CTraceOutputKMGPT.c", "-o", "CTraceOutputKMGPT.exe"])
+    subprocess.run(["gcc", "CTraceOutputKGPT.c", "-o", "CTraceOutputKGPT.exe"])
+    subprocess.run(["gcc", "CTraceOutputMGPT.c", "-o", "CTraceOutputMGPT.exe"])
     print("Compiled")
 
 # RECORD ACTION
@@ -223,21 +272,38 @@ def stop_record():
 
 # START ACTION
 def start_action():
-    global start
+    global start, mouse_on
     if start is not None:
         return
+    if mouse_on:
+        start = [
+                subprocess.Popen(["CTraceOutputKGPT.exe"]),
+                subprocess.Popen(["CTraceOutputMGPT.exe"])
+                ]
+    else:
+        start = subprocess.Popen(["CTraceOutputKGPT.exe"])
     print("Action (START)")
-    start = subprocess.Popen(["CTraceOutputKMGPT.exe"])
 # STOP ACTION
 def stop_action():
     global start
     if start is None:
         return
     try:
-        start.terminate()
-        time.sleep(2)
+        try:
+            start[0].terminate()
+            start[1].terminate()
+            time.sleep(2)
+        except:
+            start[0].kill()
+            start[1].kill()
     except:
-        start.kill()
+        try:
+            start.terminate()
+            start.terminate()
+            time.sleep(2)
+        except:
+            start.kill()
+            start.kill()
     start = None
     print("Terminate Action (STOP)")
 
@@ -261,9 +327,11 @@ def on_release(key):
         if mouse_on:
             mouse_on = False
             print("Mouse OFF")
+            return
         if not mouse_on:
             mouse_on = True
             print("Mouse ON")
+            return
         
 with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
     listener.join()
