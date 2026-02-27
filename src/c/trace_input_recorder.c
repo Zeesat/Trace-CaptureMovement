@@ -38,6 +38,54 @@ static LARGE_INTEGER g_qpc_start;
 static uint64_t g_event_count = 0;
 static DWORD g_main_thread_id = 0;
 
+#ifndef DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE
+#define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE ((HANDLE)-3)
+#endif
+
+#ifndef DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+#define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 ((HANDLE)-4)
+#endif
+
+static void enable_dpi_awareness(void) {
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (user32 != NULL) {
+        typedef BOOL(WINAPI *SetProcessDpiAwarenessContext_t)(HANDLE);
+        FARPROC raw_proc = GetProcAddress(user32, "SetProcessDpiAwarenessContext");
+        SetProcessDpiAwarenessContext_t set_context = NULL;
+        if (raw_proc != NULL) {
+            union {
+                FARPROC raw;
+                SetProcessDpiAwarenessContext_t typed;
+            } resolver;
+            resolver.raw = raw_proc;
+            set_context = resolver.typed;
+        }
+        if (set_context != NULL) {
+            if (set_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+                return;
+            }
+            if (set_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE)) {
+                return;
+            }
+        }
+
+        typedef BOOL(WINAPI *SetProcessDPIAware_t)(void);
+        SetProcessDPIAware_t set_legacy = NULL;
+        raw_proc = GetProcAddress(user32, "SetProcessDPIAware");
+        if (raw_proc != NULL) {
+            union {
+                FARPROC raw;
+                SetProcessDPIAware_t typed;
+            } resolver;
+            resolver.raw = raw_proc;
+            set_legacy = resolver.typed;
+        }
+        if (set_legacy != NULL) {
+            set_legacy();
+        }
+    }
+}
+
 static int64_t now_ns(void) {
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
@@ -155,6 +203,8 @@ int main(int argc, char **argv) {
     const char *output_path = (argc > 1) ? argv[1] : "data\\trace_events.bin";
     HHOOK keyboard = NULL;
     HHOOK mouse = NULL;
+
+    enable_dpi_awareness();
 
     g_out = fopen(output_path, "wb");
     if (g_out == NULL) {
