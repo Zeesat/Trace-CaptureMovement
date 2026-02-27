@@ -38,8 +38,8 @@ int main() {
     // STATIC TIMELINE (ns)
     // =========================
 
-   sleep_until_ns(13428180700LL);  key_evt(116,  0);
-   sleep_until_ns(13565170400LL);  key_evt(116,  1);
+   sleep_until_ns(10506525900LL);  key_evt(116,  0);
+   sleep_until_ns(10626522800LL);  key_evt(116,  1);
 
         return 0;
     }
