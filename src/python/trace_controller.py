@@ -1,22 +1,44 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
 from pathlib import Path
-from pynput import keyboard
-import time
-import json
+import signal
+import struct
 import subprocess
+import threading
+import time
+
+from pynput import keyboard
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+SRC_C_DIR = ROOT_DIR / "src" / "c"
 DATA_DIR = ROOT_DIR / "data"
-BUILD_DIR = ROOT_DIR / "build"
-TOOLS_DIR = ROOT_DIR / "tools"
+BIN_DIR = ROOT_DIR / "bin"
+GENERATED_DIR = ROOT_DIR / "generated"
 
-TRACE_JSON = DATA_DIR / "trace.json"
-RECORDER_EXE = TOOLS_DIR / "CTraceInputKMGPT.exe"
-KEYBOARD_C = BUILD_DIR / "CTraceOutputKGPT.c"
-MOUSE_C = BUILD_DIR / "CTraceOutputMGPT.c"
-KEYBOARD_EXE = BUILD_DIR / "CTraceOutputKGPT.exe"
-MOUSE_EXE = BUILD_DIR / "CTraceOutputMGPT.exe"
+RECORDER_C = SRC_C_DIR / "trace_input_recorder.c"
+RECORDER_EXE = BIN_DIR / "trace_input_recorder.exe"
+TRACE_BIN = DATA_DIR / "trace_events.bin"
+REPLAY_C = GENERATED_DIR / "trace_output_static.c"
+REPLAY_EXE = BIN_DIR / "trace_output_static.exe"
 
+EVENT_STRUCT = struct.Struct("<qBBHiii")
+
+EV_KEY_DOWN = 0
+EV_KEY_UP = 1
+EV_MOUSE_MOVE = 2
+EV_MOUSE_LEFT_DOWN = 3
+EV_MOUSE_LEFT_UP = 4
+EV_MOUSE_RIGHT_DOWN = 5
+EV_MOUSE_RIGHT_UP = 6
+EV_MOUSE_MIDDLE_DOWN = 7
+EV_MOUSE_MIDDLE_UP = 8
+EV_MOUSE_X1_DOWN = 9
+EV_MOUSE_X1_UP = 10
+EV_MOUSE_X2_DOWN = 11
+EV_MOUSE_X2_UP = 12
+EV_MOUSE_WHEEL = 13
 
 key_a = keyboard.Key.f4  # Start Recording
 key_b = keyboard.Key.f5  # Stop Recording
@@ -25,335 +47,501 @@ key_d = keyboard.Key.f2  # Start Action
 key_e = keyboard.Key.f3  # Stop Action
 key_f = keyboard.Key.f7  # Mouse
 key_g = keyboard.Key.f8  # Loop
-start = None
-record = None
+
+record_proc: subprocess.Popen[str] | None = None
+play_proc: subprocess.Popen[str] | None = None
+play_thread: threading.Thread | None = None
+play_stop = threading.Event()
+play_lock = threading.Lock()
 mouse_on = True
 loop_on = False
 
 
-# COMPILE
-def compile():
-    BUILD_DIR.mkdir(parents=True, exist_ok=True)
-    print("Compiling")
-    with TRACE_JSON.open("r", encoding="utf-8") as read_data:
-        text = read_data.read().rstrip(", \n")
-        text = "[" + text.split("[", 1)[1] + "]"
-        raw_data = json.loads(text)
+@dataclass(frozen=True)
+class TraceEvent:
+    t_ns: int
+    event_type: int
+    flags: int
+    code: int
+    x: int
+    y: int
+    wheel: int
 
-    # Format Change
-    data_keyboard_down = []
-    for action in raw_data:
-        if action["Type"] == 0:
-            type = "keyboard"
-            key = int(action["Key"])
-            down = int(action["Start"])
-            so = [type, key, down, 0]
-            data_keyboard_down.append(so)
 
-    data_keyboard_up = []
-    for action in raw_data:
-        if action["Type"] == 0:
-            type = "keyboard"
-            key = int(action["Key"])
-            up = int(action["Start"] + int(action["Hold"]))
-            so = [type, key, up, 1]
-            data_keyboard_up.append(so)
+def run_command(args: list[str]) -> None:
+    result = subprocess.run(args, cwd=ROOT_DIR, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Command failed: {' '.join(args)}\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
 
-    data_mouse = []
-    event_map = {
-        1: ("mouse_click_down", 100),
-        2: ("mouse_click_up", 100),
-        3: ("mouse_click_down", 101),
-        4: ("mouse_click_up", 101),
-        5: ("mouse_click_down", 102),
-        6: ("mouse_click_up", 102),
-        7: ("mouse_click_down", 103),
-        8: ("mouse_click_up", 103),
-        9: ("mouse_click_down", 104),
-        10: ("mouse_click_up", 104),
-    }
-    for action in raw_data:
-        if action["Type"] == 1 and action["Event"] == 100:
-            type = "mouse"
-            event = "mouse_move"
-            x = int(action["x"])
-            y = int(action["y"])
-            time = int(action["Time"])
-            so = [type, event, time, x, y]
-            data_mouse.append(so)
-        elif action["Type"] == 1 and action["Event"] == 200:
-            type = "mouse"
-            event = "mouse_scroll"
-            delta = action["Delta"]
-            time = int(action["Time"])
-            so = [type, event, time, delta]
-            data_mouse.append(so)
-        elif action["Type"] == 1:
-            type = "mouse"
-            event, internal_code = event_map.get(int(action["Event"]))
-            x = int(action["x"])
-            y = int(action["y"])
-            time = int(action["Time"])
-            so = [type, event, time, x, y, internal_code]
-            data_mouse.append(so)
+
+def compile_c(source: Path, output: Path) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    run_command(["gcc", str(source), "-O2", "-Wall", "-Wextra", "-o", str(output)])
+
+
+def load_trace_events(path: Path) -> list[TraceEvent]:
+    if not path.exists():
+        raise FileNotFoundError(f"Trace file not found: {path}")
+
+    blob = path.read_bytes()
+    if len(blob) == 0:
+        raise RuntimeError("Trace file is empty. Record input first (F4/F5).")
+    if len(blob) % EVENT_STRUCT.size != 0:
+        raise RuntimeError("Trace file size is invalid (format mismatch).")
+
+    events: list[TraceEvent] = []
+    for row in EVENT_STRUCT.iter_unpack(blob):
+        events.append(TraceEvent(*row))
+
+    if not events:
+        raise RuntimeError("Trace has no events.")
+    return events
+
+
+def generate_replay_source(events: list[TraceEvent]) -> None:
+    GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+
+    lines: list[str] = [
+        "#include <windows.h>",
+        "#include <stdint.h>",
+        "#include <stdio.h>",
+        "#include <stddef.h>",
+        "#include <string.h>",
+        "",
+        "#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION",
+        "#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002",
+        "#endif",
+        "",
+        "enum {",
+        f"    EV_KEY_DOWN = {EV_KEY_DOWN},",
+        f"    EV_KEY_UP = {EV_KEY_UP},",
+        f"    EV_MOUSE_MOVE = {EV_MOUSE_MOVE},",
+        f"    EV_MOUSE_LEFT_DOWN = {EV_MOUSE_LEFT_DOWN},",
+        f"    EV_MOUSE_LEFT_UP = {EV_MOUSE_LEFT_UP},",
+        f"    EV_MOUSE_RIGHT_DOWN = {EV_MOUSE_RIGHT_DOWN},",
+        f"    EV_MOUSE_RIGHT_UP = {EV_MOUSE_RIGHT_UP},",
+        f"    EV_MOUSE_MIDDLE_DOWN = {EV_MOUSE_MIDDLE_DOWN},",
+        f"    EV_MOUSE_MIDDLE_UP = {EV_MOUSE_MIDDLE_UP},",
+        f"    EV_MOUSE_X1_DOWN = {EV_MOUSE_X1_DOWN},",
+        f"    EV_MOUSE_X1_UP = {EV_MOUSE_X1_UP},",
+        f"    EV_MOUSE_X2_DOWN = {EV_MOUSE_X2_DOWN},",
+        f"    EV_MOUSE_X2_UP = {EV_MOUSE_X2_UP},",
+        f"    EV_MOUSE_WHEEL = {EV_MOUSE_WHEEL}",
+        "};",
+        "",
+        "typedef struct TraceEvent {",
+        "    int64_t t_ns;",
+        "    uint8_t type;",
+        "    uint8_t flags;",
+        "    uint16_t code;",
+        "    int32_t x;",
+        "    int32_t y;",
+        "    int32_t wheel;",
+        "} TraceEvent;",
+        "",
+        "static const TraceEvent EVENTS[] = {",
+    ]
+
+    for event in events:
+        lines.append(
+            f"    {{{event.t_ns}LL, {event.event_type}, {event.flags}, "
+            f"{event.code}, {event.x}, {event.y}, {event.wheel}}},"
+        )
+
+    lines.extend(
+        [
+            "};",
+            "",
+            "static const size_t EVENT_COUNT = sizeof(EVENTS) / sizeof(EVENTS[0]);",
+            "static LARGE_INTEGER g_qpc_freq;",
+            "static HANDLE g_timer = NULL;",
+            "",
+            "static HANDLE create_timer(void) {",
+            "    HANDLE timer = CreateWaitableTimerExW(",
+            "        NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_MODIFY_STATE | SYNCHRONIZE",
+            "    );",
+            "    if (timer == NULL) {",
+            "        timer = CreateWaitableTimerW(NULL, FALSE, NULL);",
+            "    }",
+            "    return timer;",
+            "}",
+            "",
+            "static int64_t elapsed_ns(const LARGE_INTEGER *start) {",
+            "    LARGE_INTEGER now;",
+            "    QueryPerformanceCounter(&now);",
+            "    return (int64_t)(",
+            "        ((long double)(now.QuadPart - start->QuadPart) * 1000000000.0L) /",
+            "        (long double)g_qpc_freq.QuadPart",
+            "    );",
+            "}",
+            "",
+            "static void sleep_ns(int64_t ns) {",
+            "    LARGE_INTEGER due;",
+            "    if (g_timer == NULL || ns <= 0) {",
+            "        return;",
+            "    }",
+            "    due.QuadPart = -(ns / 100);",
+            "    if (due.QuadPart == 0) {",
+            "        due.QuadPart = -1;",
+            "    }",
+            "    if (SetWaitableTimer(g_timer, &due, 0, NULL, NULL, FALSE)) {",
+            "        WaitForSingleObject(g_timer, INFINITE);",
+            "    }",
+            "}",
+            "",
+            "static void wait_until_ns(const LARGE_INTEGER *start, int64_t target_ns) {",
+            "    for (;;) {",
+            "        int64_t remain = target_ns - elapsed_ns(start);",
+            "        if (remain <= 0) {",
+            "            return;",
+            "        }",
+            "        if (remain > 2000000LL) {",
+            "            sleep_ns(remain - 500000LL);",
+            "            continue;",
+            "        }",
+            "        if (remain > 50000LL) {",
+            "            SwitchToThread();",
+            "            continue;",
+            "        }",
+            "        YieldProcessor();",
+            "    }",
+            "}",
+            "",
+            "static LONG normalize_mouse_coord(int value, int origin, int span) {",
+            "    long long normalized;",
+            "    if (span <= 1) {",
+            "        return 0;",
+            "    }",
+            "    normalized = ((long long)(value - origin) * 65535LL) / (long long)(span - 1);",
+            "    if (normalized < 0) {",
+            "        normalized = 0;",
+            "    }",
+            "    if (normalized > 65535) {",
+            "        normalized = 65535;",
+            "    }",
+            "    return (LONG)normalized;",
+            "}",
+            "",
+            "static void send_key(uint16_t scan_code, uint8_t flags, int key_up) {",
+            "    INPUT in;",
+            "    ZeroMemory(&in, sizeof(in));",
+            "    in.type = INPUT_KEYBOARD;",
+            "    in.ki.wScan = scan_code;",
+            "    in.ki.dwFlags = KEYEVENTF_SCANCODE;",
+            "    if ((flags & 0x01u) != 0) {",
+            "        in.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;",
+            "    }",
+            "    if (key_up) {",
+            "        in.ki.dwFlags |= KEYEVENTF_KEYUP;",
+            "    }",
+            "    SendInput(1, &in, sizeof(in));",
+            "}",
+            "",
+            "static void send_mouse_move_abs(int x, int y) {",
+            "    INPUT in;",
+            "    int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);",
+            "    int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);",
+            "    int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);",
+            "    int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);",
+            "    ZeroMemory(&in, sizeof(in));",
+            "    in.type = INPUT_MOUSE;",
+            "    in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;",
+            "    in.mi.dx = normalize_mouse_coord(x, vx, vw);",
+            "    in.mi.dy = normalize_mouse_coord(y, vy, vh);",
+            "    SendInput(1, &in, sizeof(in));",
+            "}",
+            "",
+            "static void send_mouse_button(uint8_t type) {",
+            "    INPUT in;",
+            "    ZeroMemory(&in, sizeof(in));",
+            "    in.type = INPUT_MOUSE;",
+            "    switch (type) {",
+            "        case EV_MOUSE_LEFT_DOWN: in.mi.dwFlags = MOUSEEVENTF_LEFTDOWN; break;",
+            "        case EV_MOUSE_LEFT_UP: in.mi.dwFlags = MOUSEEVENTF_LEFTUP; break;",
+            "        case EV_MOUSE_RIGHT_DOWN: in.mi.dwFlags = MOUSEEVENTF_RIGHTDOWN; break;",
+            "        case EV_MOUSE_RIGHT_UP: in.mi.dwFlags = MOUSEEVENTF_RIGHTUP; break;",
+            "        case EV_MOUSE_MIDDLE_DOWN: in.mi.dwFlags = MOUSEEVENTF_MIDDLEDOWN; break;",
+            "        case EV_MOUSE_MIDDLE_UP: in.mi.dwFlags = MOUSEEVENTF_MIDDLEUP; break;",
+            "        case EV_MOUSE_X1_DOWN:",
+            "            in.mi.dwFlags = MOUSEEVENTF_XDOWN;",
+            "            in.mi.mouseData = XBUTTON1;",
+            "            break;",
+            "        case EV_MOUSE_X1_UP:",
+            "            in.mi.dwFlags = MOUSEEVENTF_XUP;",
+            "            in.mi.mouseData = XBUTTON1;",
+            "            break;",
+            "        case EV_MOUSE_X2_DOWN:",
+            "            in.mi.dwFlags = MOUSEEVENTF_XDOWN;",
+            "            in.mi.mouseData = XBUTTON2;",
+            "            break;",
+            "        case EV_MOUSE_X2_UP:",
+            "            in.mi.dwFlags = MOUSEEVENTF_XUP;",
+            "            in.mi.mouseData = XBUTTON2;",
+            "            break;",
+            "        default:",
+            "            return;",
+            "    }",
+            "    SendInput(1, &in, sizeof(in));",
+            "}",
+            "",
+            "static void send_mouse_wheel(int32_t amount) {",
+            "    INPUT in;",
+            "    int32_t clamped = amount;",
+            "    if (clamped > 32767) {",
+            "        clamped = 32767;",
+            "    }",
+            "    if (clamped < -32768) {",
+            "        clamped = -32768;",
+            "    }",
+            "    ZeroMemory(&in, sizeof(in));",
+            "    in.type = INPUT_MOUSE;",
+            "    in.mi.dwFlags = MOUSEEVENTF_WHEEL;",
+            "    in.mi.mouseData = (DWORD)(SHORT)clamped;",
+            "    SendInput(1, &in, sizeof(in));",
+            "}",
+            "",
+            "static void replay_event(const TraceEvent *event, int allow_mouse) {",
+            "    switch (event->type) {",
+            "        case EV_KEY_DOWN:",
+            "            send_key(event->code, event->flags, 0);",
+            "            break;",
+            "        case EV_KEY_UP:",
+            "            send_key(event->code, event->flags, 1);",
+            "            break;",
+            "        case EV_MOUSE_MOVE:",
+            "            if (allow_mouse) {",
+            "                send_mouse_move_abs(event->x, event->y);",
+            "            }",
+            "            break;",
+            "        case EV_MOUSE_WHEEL:",
+            "            if (allow_mouse) {",
+            "                send_mouse_wheel(event->wheel);",
+            "            }",
+            "            break;",
+            "        default:",
+            "            if (allow_mouse) {",
+            "                send_mouse_button(event->type);",
+            "            }",
+            "            break;",
+            "    }",
+            "}",
+            "",
+            "int main(int argc, char **argv) {",
+            "    size_t i;",
+            "    int allow_mouse = 1;",
+            "    int64_t base_ns;",
+            "    LARGE_INTEGER start;",
+            "",
+            "    for (i = 1; i < (size_t)argc; ++i) {",
+            "        if (strcmp(argv[i], \"--no-mouse\") == 0) {",
+            "            allow_mouse = 0;",
+            "        }",
+            "    }",
+            "",
+            "    if (EVENT_COUNT == 0) {",
+            "        fprintf(stderr, \"No events compiled.\\n\");",
+            "        return 1;",
+            "    }",
+            "    if (!QueryPerformanceFrequency(&g_qpc_freq)) {",
+            "        fprintf(stderr, \"QPC not available.\\n\");",
+            "        return 1;",
+            "    }",
+            "",
+            "    g_timer = create_timer();",
+            "    QueryPerformanceCounter(&start);",
+            "    base_ns = EVENTS[0].t_ns;",
+            "",
+            "    for (i = 0; i < EVENT_COUNT; ++i) {",
+            "        int64_t target_ns = EVENTS[i].t_ns - base_ns;",
+            "        if (target_ns < 0) {",
+            "            target_ns = 0;",
+            "        }",
+            "        wait_until_ns(&start, target_ns);",
+            "        replay_event(&EVENTS[i], allow_mouse);",
+            "    }",
+            "",
+            "    if (g_timer != NULL) {",
+            "        CloseHandle(g_timer);",
+            "    }",
+            "    return 0;",
+            "}",
+            "",
+        ]
+    )
+
+    REPLAY_C.write_text("\n".join(lines), encoding="ascii")
+
+
+def build_recorder() -> None:
+    compile_c(RECORDER_C, RECORDER_EXE)
+
+
+def build_replay() -> int:
+    events = load_trace_events(TRACE_BIN)
+    generate_replay_source(events)
+    compile_c(REPLAY_C, REPLAY_EXE)
+    return len(events)
+
+
+def compile_all() -> None:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        BIN_DIR.mkdir(parents=True, exist_ok=True)
+        GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+
+        build_recorder()
+        if TRACE_BIN.exists():
+            count = build_replay()
+            print(f"Compiled recorder + static replay ({count} events).")
         else:
-            continue
-
-    data_join = data_keyboard_down + data_keyboard_up + data_mouse
-    data_sorted = sorted(data_join, key=lambda x: x[2])
-
-    code_C_mouse = r'''
-#include <windows.h>
-#include <stdio.h>
-
-typedef LONG NTSTATUS;
-typedef NTSTATUS (WINAPI *NtDelayExecution_t)(BOOL Alertable, PLARGE_INTEGER DelayInterval);
-
-void sleep_until_ns(long long target_ns) {
-    static long long current_ns = 0;
-    static NtDelayExecution_t NtDelayExecution = NULL;
-
-    if (!NtDelayExecution) {
-        NtDelayExecution = (NtDelayExecution_t)
-            GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtDelayExecution");
-    }
-
-    long long delta_ns = target_ns - current_ns;
-    if (delta_ns > 0) {
-        LARGE_INTEGER interval;
-        interval.QuadPart = - (delta_ns / 100);
-        NtDelayExecution(FALSE, &interval);
-    }
-    current_ns = target_ns;
-}
-
-void mouse_move(int x, int y) {
-    INPUT in = {0};
-    in.type = INPUT_MOUSE;
-    in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
-    in.mi.dx = (x * 65535) / GetSystemMetrics(SM_CXSCREEN);
-    in.mi.dy = (y * 65535) / GetSystemMetrics(SM_CYSCREEN);
-    SendInput(1, &in, sizeof(INPUT));
-}
-
-void mouse_click_down(int event) {
-    INPUT in = {0};
-    in.type = INPUT_MOUSE;
-
-    if (event == 100)      in.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-    else if (event == 101) in.mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
-    else if (event == 102) in.mi.dwFlags = MOUSEEVENTF_MIDDLEDOWN;
-
-    SendInput(1, &in, sizeof(INPUT));
-}
-
-void mouse_click_up(int event) {
-    INPUT in = {0};
-    in.type = INPUT_MOUSE;
-
-    if (event == 100)      in.mi.dwFlags = MOUSEEVENTF_LEFTUP;
-    else if (event == 101) in.mi.dwFlags = MOUSEEVENTF_RIGHTUP;
-    else if (event == 102) in.mi.dwFlags = MOUSEEVENTF_MIDDLEUP;
-
-    SendInput(1, &in, sizeof(INPUT));
-}
-
-void mouse_scroll(int amount) {
-    INPUT in = {0};
-    in.type = INPUT_MOUSE;
-    in.mi.dwFlags = MOUSEEVENTF_WHEEL;
-    in.mi.mouseData = amount;
-    SendInput(1, &in, sizeof(INPUT));
-}
-
-int main() {
-
-    '''
-    MOUSE_C.write_text(code_C_mouse, encoding="utf-8")
-
-    code_C_keyboard = r'''
-#include <windows.h>
-#include <stdio.h>
-
-typedef LONG NTSTATUS;
-typedef NTSTATUS (WINAPI *NtDelayExecution_t)(BOOL Alertable, PLARGE_INTEGER DelayInterval);
-
-void sleep_until_ns(long long target_ns) {
-    static long long current_ns = 0;
-    static NtDelayExecution_t NtDelayExecution = NULL;
-
-    if (!NtDelayExecution) {
-        NtDelayExecution = (NtDelayExecution_t)
-            GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtDelayExecution");
-    }
-
-    long long delta_ns = target_ns - current_ns;
-    if (delta_ns > 0) {
-        LARGE_INTEGER interval;
-        interval.QuadPart = - (delta_ns / 100);
-        NtDelayExecution(FALSE, &interval);
-    }
-
-    current_ns = target_ns;
-}
-
-void key_evt(int vk, int isUp) {
-    INPUT in = {0};
-    in.type = INPUT_KEYBOARD;
-    in.ki.wScan = MapVirtualKey(vk, MAPVK_VK_TO_VSC);
-    in.ki.dwFlags = KEYEVENTF_SCANCODE | (isUp ? KEYEVENTF_KEYUP : 0);
-    SendInput(1, &in, sizeof(INPUT));
-}
-
-int main() {
-
-'''
-    KEYBOARD_C.write_text(code_C_keyboard, encoding="utf-8")
-
-    with KEYBOARD_C.open("a", encoding="utf-8") as k_code, MOUSE_C.open("a", encoding="utf-8") as m_code:
-        for action in data_sorted:
-            if action[0] == "keyboard":
-                C_action = f"   sleep_until_ns({action[2]}LL);  key_evt({action[1]},  {action[3]});\n"
-                k_code.write(C_action)
-                continue
-            if action[0] == "mouse":
-                if action[1] == "mouse_move":
-                    C_action = f"   sleep_until_ns({action[2]}LL);  {action[1]}({action[3]}, {action[4]});\n"
-                elif action[1] == "mouse_scroll":
-                    C_action = f"   sleep_until_ns({action[2]}LL);  {action[1]}({action[3]});\n"
-                else:
-                    C_action = f"   sleep_until_ns({action[2]}LL);  {action[1]}({action[5]});\n"
-                m_code.write(C_action)
-
-    code_C_close = '''
-        return 0;
-    }
-    '''
-    with KEYBOARD_C.open("a", encoding="utf-8") as k_close, MOUSE_C.open("a", encoding="utf-8") as m_close:
-        k_close.write(code_C_close)
-        m_close.write(code_C_close)
-
-    subprocess.run(["gcc", str(KEYBOARD_C), "-o", str(KEYBOARD_EXE)], check=False)
-    subprocess.run(["gcc", str(MOUSE_C), "-o", str(MOUSE_EXE)], check=False)
-    print("Compiled")
+            print("Recorder compiled. No trace_events.bin yet, replay was skipped.")
+    except Exception as exc:
+        print(f"Compile failed: {exc}")
 
 
-# RECORD ACTION
-def record_action():
-    global record
-    if record is not None:
-        return
-    record = subprocess.Popen([str(RECORDER_EXE)])
-    print("Recording (START)")
-
-
-# STOP RECORD
-def stop_record():
-    global record
-    if record is None:
+def terminate_process(proc: subprocess.Popen[str], timeout_sec: float = 2.0) -> None:
+    if proc.poll() is not None:
         return
     try:
-        record.terminate()
-        time.sleep(2)
-    except Exception:
-        record.kill()
-    record = None
-    print("Recorded (STOP)")
-
-
-# START ACTION
-def start_action():
-    global start, mouse_on, loop_on
-    if start is not None:
+        proc.send_signal(signal.CTRL_BREAK_EVENT)
+        proc.wait(timeout=timeout_sec)
         return
+    except Exception:
+        pass
+    try:
+        proc.terminate()
+        proc.wait(timeout=timeout_sec)
+        return
+    except Exception:
+        pass
+    proc.kill()
+
+
+def record_action() -> None:
+    global record_proc
+    if record_proc is not None and record_proc.poll() is None:
+        return
+
+    try:
+        if not RECORDER_EXE.exists() or RECORDER_EXE.stat().st_mtime < RECORDER_C.stat().st_mtime:
+            build_recorder()
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        record_proc = subprocess.Popen(
+            [str(RECORDER_EXE), str(TRACE_BIN)],
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+        print("Recording (START)")
+    except Exception as exc:
+        record_proc = None
+        print(f"Recording start failed: {exc}")
+
+
+def stop_record() -> None:
+    global record_proc
+    if record_proc is None:
+        return
+    terminate_process(record_proc)
+    record_proc = None
+    print("Recording (STOP)")
+
+
+def replay_worker(repeat: bool, allow_mouse: bool) -> None:
+    global play_proc
+    try:
+        while not play_stop.is_set():
+            cmd = [str(REPLAY_EXE)]
+            if not allow_mouse:
+                cmd.append("--no-mouse")
+
+            proc = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+            with play_lock:
+                play_proc = proc
+
+            while proc.poll() is None and not play_stop.is_set():
+                time.sleep(0.005)
+
+            if play_stop.is_set() and proc.poll() is None:
+                terminate_process(proc, timeout_sec=1.0)
+
+            with play_lock:
+                play_proc = None
+
+            if not repeat:
+                break
+    finally:
+        with play_lock:
+            play_proc = None
+
+
+def start_action() -> None:
+    global play_thread
+
+    if play_thread is not None and play_thread.is_alive():
+        return
+
+    try:
+        if (not REPLAY_EXE.exists()) or (TRACE_BIN.exists() and REPLAY_EXE.stat().st_mtime < TRACE_BIN.stat().st_mtime):
+            count = build_replay()
+            print(f"Replay rebuilt ({count} events).")
+    except Exception as exc:
+        print(f"Cannot start action: {exc}")
+        return
+
+    play_stop.clear()
+    play_thread = threading.Thread(target=replay_worker, args=(loop_on, mouse_on), daemon=True)
+    play_thread.start()
     print("Action (START)")
 
-    if loop_on:
-        start = True
-        while start:
-            if mouse_on:
-                p1 = subprocess.Popen([str(KEYBOARD_EXE)])
-                p2 = subprocess.Popen([str(MOUSE_EXE)])
-                while start and (p1.poll() is None or p2.poll() is None):
-                    time.sleep(0.05)
 
-            else:
-                p = subprocess.Popen([str(KEYBOARD_EXE)])
-                while start and p.poll() is None:
-                    time.sleep(0.05)
-
-    else:
-        if mouse_on:
-            start = [subprocess.Popen([str(KEYBOARD_EXE)]), subprocess.Popen([str(MOUSE_EXE)])]
-        else:
-            start = subprocess.Popen([str(KEYBOARD_EXE)])
-
-
-# STOP ACTION
-def stop_action():
-    global start
-    if start is None:
+def stop_action() -> None:
+    global play_thread
+    if play_thread is None or not play_thread.is_alive():
         return
 
-    if start is True:
-        start = None
-        return
+    play_stop.set()
+    with play_lock:
+        if play_proc is not None and play_proc.poll() is None:
+            terminate_process(play_proc, timeout_sec=1.0)
 
-    try:
-        try:
-            start[0].terminate()
-            start[1].terminate()
-            time.sleep(2)
-        except Exception:
-            start[0].kill()
-            start[1].kill()
-    except Exception:
-        try:
-            start.terminate()
-            time.sleep(2)
-        except Exception:
-            start.kill()
-    start = None
-    print("Terminate Action (STOP)")
+    play_thread.join(timeout=3.0)
+    play_thread = None
+    print("Action (STOP)")
 
 
-def on_press(key):
+def on_press(key: keyboard.Key | keyboard.KeyCode) -> None:
     if key == keyboard.Key.f9:
-        print("nothing")
+        print("idle")
 
 
-def on_release(key):
+def on_release(key: keyboard.Key | keyboard.KeyCode) -> None:
+    global mouse_on, loop_on
+
     if key == key_a:
         record_action()
-    if key == key_b:
+    elif key == key_b:
         stop_record()
-    if key == key_c:
-        compile()
-    if key == key_d:
+    elif key == key_c:
+        compile_all()
+    elif key == key_d:
         start_action()
-    if key == key_e:
+    elif key == key_e:
         stop_action()
-    if key == key_f:
-        global mouse_on
-        if mouse_on:
-            mouse_on = False
-            print("Mouse OFF")
-            return
-        if not mouse_on:
-            mouse_on = True
-            print("Mouse ON")
-            return
-    if key == key_g:
-        global loop_on
-        if loop_on:
-            loop_on = False
-            print("Loop OFF")
-            return
-        if not loop_on:
-            loop_on = True
-            print("Loop ON")
-            return
+    elif key == key_f:
+        mouse_on = not mouse_on
+        print("Mouse ON" if mouse_on else "Mouse OFF")
+    elif key == key_g:
+        loop_on = not loop_on
+        print("Loop ON" if loop_on else "Loop OFF")
 
 
-with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-    listener.join()
+def main() -> None:
+    with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
+        listener.join()
+
+
+if __name__ == "__main__":
+    main()

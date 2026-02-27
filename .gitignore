@@ -1,10 +1,12 @@
-﻿# Python cache
+# Python cache
 __pycache__/
 *.pyc
 
-# Build outputs
-build/*.exe
+# Generated replay source and binaries
+generated/
+bin/
+data/trace_events.bin
 
-# Temporary files
+# Legacy/temporary logs
 *.log
 *.tmp
