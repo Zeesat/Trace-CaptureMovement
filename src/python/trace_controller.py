@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
+import shutil
 import signal
 import struct
 import subprocess
@@ -22,6 +24,13 @@ RECORDER_EXE = BIN_DIR / "trace_input_recorder.exe"
 TRACE_BIN = DATA_DIR / "trace_events.bin"
 REPLAY_C = GENERATED_DIR / "trace_output_static.c"
 REPLAY_EXE = BIN_DIR / "trace_output_static.exe"
+
+COMMON_COMPILER_DIRS = (
+    Path(r"C:\msys64\ucrt64\bin"),
+    Path(r"C:\msys64\mingw64\bin"),
+    Path(r"C:\msys64\clang64\bin"),
+    Path(r"C:\mingw64\bin"),
+)
 
 EVENT_STRUCT = struct.Struct("<qBBHiii")
 
@@ -68,8 +77,60 @@ class TraceEvent:
     wheel: int
 
 
-def run_command(args: list[str]) -> None:
-    result = subprocess.run(args, cwd=ROOT_DIR, capture_output=True, text=True, check=False)
+def collect_compiler_dirs() -> list[str]:
+    directories: list[str] = []
+    seen: set[str] = set()
+
+    for path in COMMON_COMPILER_DIRS:
+        if not path.exists():
+            continue
+        normalized = str(path).lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        directories.append(str(path))
+
+    return directories
+
+
+def build_process_env() -> dict[str, str]:
+    env = os.environ.copy()
+    path_parts = collect_compiler_dirs()
+    current_path = env.get("PATH", "")
+
+    if current_path:
+        path_parts.extend(part for part in current_path.split(os.pathsep) if part)
+
+    if path_parts:
+        merged_parts: list[str] = []
+        seen: set[str] = set()
+        for part in path_parts:
+            normalized = part.lower()
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            merged_parts.append(part)
+        env["PATH"] = os.pathsep.join(merged_parts)
+
+    return env
+
+
+def resolve_gcc() -> tuple[str, dict[str, str]]:
+    env = build_process_env()
+    compiler = shutil.which("gcc", path=env.get("PATH", ""))
+    if compiler is not None:
+        return compiler, env
+
+    fallback_dirs = collect_compiler_dirs()
+    checked_dirs = ", ".join(fallback_dirs) if fallback_dirs else "(no known compiler directories found)"
+    raise FileNotFoundError(
+        "gcc was not found. Add your compiler bin directory to PATH "
+        f"or install GCC in a standard MSYS2 location. Checked: {checked_dirs}"
+    )
+
+
+def run_command(args: list[str], env: dict[str, str] | None = None) -> None:
+    result = subprocess.run(args, cwd=ROOT_DIR, env=env, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise RuntimeError(
             f"Command failed: {' '.join(args)}\n"
@@ -80,7 +141,8 @@ def run_command(args: list[str]) -> None:
 
 def compile_c(source: Path, output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
-    run_command(["gcc", str(source), "-O2", "-Wall", "-Wextra", "-o", str(output)])
+    compiler, env = resolve_gcc()
+    run_command([compiler, str(source), "-O2", "-Wall", "-Wextra", "-o", str(output)], env=env)
 
 
 def load_trace_events(path: Path) -> list[TraceEvent]:

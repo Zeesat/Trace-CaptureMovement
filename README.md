@@ -15,6 +15,7 @@
 1. Install Python dependency:
    - `pip install pynput`
 2. Make sure `gcc` is available in PATH.
+   - `trace_controller.py` also tries common MSYS2 compiler paths such as `C:\msys64\ucrt64\bin` automatically.
 3. Run controller:
    - `python src/python/trace_controller.py`
 
