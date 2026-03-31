@@ -512,7 +512,7 @@ def compile_all() -> None:
         BIN_DIR.mkdir(parents=True, exist_ok=True)
         GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 
-        build_recorder()
+        # build_recorder()
         if TRACE_BIN.exists():
             count = build_replay()
             print(f"Compiled recorder + static replay ({count} events).")
@@ -603,7 +603,7 @@ def start_action() -> None:
         return
 
     try:
-        if (not REPLAY_EXE.exists()) or (TRACE_BIN.exists() and REPLAY_EXE.stat().st_mtime < TRACE_BIN.stat().st_mtime):
+        if (not REPLAY_EXE.exists()):
             count = build_replay()
             print(f"Replay rebuilt ({count} events).")
     except Exception as exc:

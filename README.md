@@ -1,4 +1,7 @@
 # Trace 2
+This project is a high-precision input automation tool that records and replays keyboard and mouse events on Windows. It combines Python for orchestration and C for performance-critical replay execution.
+
+The system captures user input in real time, stores it in a compact binary format, and then generates a standalone C program that replays the recorded events with accurate timing. This generated program is compiled into an executable, allowing deterministic and efficient playback without requiring the original Python environment.
 
 ## Project Structure
 
