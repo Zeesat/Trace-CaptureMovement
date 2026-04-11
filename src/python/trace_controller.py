@@ -499,11 +499,28 @@ def build_recorder() -> None:
     compile_c(RECORDER_C, RECORDER_EXE)
 
 
-def build_replay() -> int:
+def refresh_replay_source() -> int:
     events = load_trace_events(TRACE_BIN)
     generate_replay_source(events)
-    compile_c(REPLAY_C, REPLAY_EXE)
     return len(events)
+
+
+def build_replay() -> int:
+    # Regenerate source only when missing or older than the latest trace.
+    source_refresh_needed = not REPLAY_C.exists()
+
+    if not source_refresh_needed and TRACE_BIN.exists():
+        source_refresh_needed = REPLAY_C.stat().st_mtime < TRACE_BIN.stat().st_mtime
+
+    if source_refresh_needed:
+        event_count = refresh_replay_source()
+        print(f"Generated replay source ({event_count} events).")
+    else:
+        event_count = 0
+
+    compile_c(REPLAY_C, REPLAY_EXE)
+    print("Compiled replay executable.")
+    return event_count
 
 
 def compile_all() -> None:
@@ -565,6 +582,11 @@ def stop_record() -> None:
         return
     terminate_process(record_proc)
     record_proc = None
+    try:
+        event_count = refresh_replay_source()
+        print(f"Replay source updated ({event_count} events).")
+    except Exception as exc:
+        print(f"Replay source update failed: {exc}")
     print("Recording (STOP)")
 
 
@@ -603,7 +625,9 @@ def start_action() -> None:
         return
 
     try:
-        if (not REPLAY_EXE.exists()):
+        if (not REPLAY_EXE.exists()) or (
+            REPLAY_C.exists() and REPLAY_EXE.stat().st_mtime < REPLAY_C.stat().st_mtime
+        ):
             count = build_replay()
             print(f"Replay rebuilt ({count} events).")
     except Exception as exc:
