@@ -1,0 +1,5 @@
+# Mouse trace
+# Move: <time> -> (<x>, <y>)
+# Left Click: <time> at (<x>, <y>) (<hold duration>)
+# Wheel: <time> at (<x>, <y>) delta <amount>
+

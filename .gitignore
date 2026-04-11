@@ -11,3 +11,7 @@ data/trace_events.bin
 *.log
 *.tmp
 legacy/
+
+# Tools
+tools/trace_codec/mouse_readable.txt
+tools/trace_codec/keyboard_readable.txt

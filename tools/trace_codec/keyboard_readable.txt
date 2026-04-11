@@ -1,0 +1,9 @@
+# Keyboard trace
+# Format: Key <name>: <press time> (<hold duration>)
+# Time examples accepted by Encoder.py: 9.25, 9.25 s, 1 m 10.25 s, 1m10.25s
+
+Key W: 0.9684204 s (0.3589716 s)
+Key Z: 1.6894282 s (0.1119753 s)
+Key S: 3.769551 s (0.3589716 s)
+Key E: 6.345612 s (0.1199886 s)
+Key F5: 6.8836393 s (0.2000251 s)
