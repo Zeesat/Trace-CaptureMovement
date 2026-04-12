@@ -10,8 +10,7 @@ from codec_common import (
     EV_MOUSE_WHEEL,
     KEYBOARD_TEXT,
     MOUSE_TEXT,
-    REPLAY_C,
-    TRACE_BIN,
+    TRACE_SOURCE_C,
     TraceEvent,
     format_time_ns,
     key_label_from_event,
@@ -21,9 +20,7 @@ from codec_common import (
 
 
 def default_input_path() -> Path:
-    if TRACE_BIN.exists():
-        return TRACE_BIN
-    return REPLAY_C
+    return TRACE_SOURCE_C
 
 
 def keyboard_lines(events: list[TraceEvent]) -> list[str]:
@@ -31,6 +28,7 @@ def keyboard_lines(events: list[TraceEvent]) -> list[str]:
     lines = [
         "# Keyboard trace",
         "# Format: Key <name>: <press time> (<hold duration>)",
+        "# Optional: Key <name>: <press time> + <delay> -m|-k (<hold duration> + <extra hold>)",
         "# Time examples accepted by Encoder.py: 9.25, 9.25 s, 1 m 10.25 s, 1m10.25s",
         "",
     ]
@@ -70,6 +68,7 @@ def mouse_lines(events: list[TraceEvent]) -> list[str]:
         "# Move: <time> -> (<x>, <y>)",
         "# Left Click: <time> at (<x>, <y>) (<hold duration>)",
         "# Wheel: <time> at (<x>, <y>) delta <amount>",
+        "# Optional delay modifiers also work here, for example: Move: 1.2 s + 0.5 s -k -> (100, 200)",
         "",
     ]
 
@@ -127,7 +126,7 @@ def write_lines(path: Path, lines: list[str]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Decode trace data into readable keyboard and mouse files.")
-    parser.add_argument("--input", type=Path, default=default_input_path(), help="Source .bin or generated .c file")
+    parser.add_argument("--input", type=Path, default=default_input_path(), help="Source generated .c file")
     parser.add_argument("--keyboard-out", type=Path, default=KEYBOARD_TEXT, help="Keyboard readable output path")
     parser.add_argument("--mouse-out", type=Path, default=MOUSE_TEXT, help="Mouse readable output path")
     args = parser.parse_args()

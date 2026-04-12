@@ -10,6 +10,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = SCRIPT_DIR.parents[1]
 TRACE_BIN = ROOT_DIR / "data" / "trace_events.bin"
 REPLAY_C = ROOT_DIR / "generated" / "trace_output_static.c"
+TRACE_SOURCE_C = REPLAY_C
 KEYBOARD_TEXT = SCRIPT_DIR / "keyboard_readable.txt"
 MOUSE_TEXT = SCRIPT_DIR / "mouse_readable.txt"
 

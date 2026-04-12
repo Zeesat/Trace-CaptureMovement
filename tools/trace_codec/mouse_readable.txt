@@ -2,4 +2,5 @@
 # Move: <time> -> (<x>, <y>)
 # Left Click: <time> at (<x>, <y>) (<hold duration>)
 # Wheel: <time> at (<x>, <y>) delta <amount>
+# Optional delay modifiers also work here, for example: Move: 1.2 s + 0.5 s -k -> (100, 200)
 
