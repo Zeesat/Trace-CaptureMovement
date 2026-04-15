@@ -33,6 +33,7 @@ typedef struct TraceEvent {
 #pragma pack(pop)
 
 static const DWORD TRACE_INJECT_TAG = 0x54524345u;
+static const uint8_t MOUSE_FLAG_INITIAL_ABS = 0x80u;
 
 static FILE *g_out = NULL;
 static LARGE_INTEGER g_qpc_freq;
@@ -131,6 +132,17 @@ static void write_event(
     int32_t wheel
 ) {
     write_event_at(now_ns(), type, flags, code, x, y, wheel);
+}
+
+static void write_initial_cursor_anchor(void) {
+    POINT cursor;
+    if (g_out == NULL) {
+        return;
+    }
+    if (!GetCursorPos(&cursor)) {
+        return;
+    }
+    write_event(EV_MOUSE_MOVE, MOUSE_FLAG_INITIAL_ABS, 0, cursor.x, cursor.y, 0);
 }
 
 static LRESULT CALLBACK keyboard_hook(int n_code, WPARAM w_param, LPARAM l_param) {
@@ -345,6 +357,8 @@ int main(int argc, char **argv) {
 
     printf("Recording relative input to %s\n", output_path);
     printf("Press Ctrl+Break to stop recording.\n");
+
+    write_initial_cursor_anchor();
 
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
         TranslateMessage(&msg);

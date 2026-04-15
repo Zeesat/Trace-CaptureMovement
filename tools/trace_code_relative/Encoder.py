@@ -12,6 +12,7 @@ from codec_common import (
     EV_MOUSE_MOVE,
     EV_MOUSE_WHEEL,
     KEYBOARD_TEXT,
+    MOUSE_FLAG_INITIAL_ABS,
     MOUSE_TEXT,
     TRACE_SOURCE_C,
     TraceEvent,
@@ -193,6 +194,31 @@ def parse_mouse_file(path: Path) -> tuple[list[TimelineEntry], list[str]]:
         try:
             label, body = split_label_and_body(line)
             normalized_label = re.sub(r"[^a-z0-9]+", "", label.lower())
+
+            if normalized_label == "init":
+                coord_match = COORD_RE.search(body)
+                if coord_match is None:
+                    raise ValueError("Missing initial coordinates")
+                time_text = body[: coord_match.start()]
+                time_text = re.sub(r"\b(?:at|init|start|anchor)\b", " ", time_text, flags=re.IGNORECASE)
+                time_text = re.sub(r"\s+", " ", time_text).strip()
+                time_ns, start_shift_ns, affected_categories = parse_timed_value(time_text, allow_scope=True)
+                x = int(coord_match.group(1))
+                y = int(coord_match.group(2))
+                entries.append(
+                    build_entry(
+                        category=CATEGORY_MOUSE,
+                        base_start_ns=time_ns,
+                        start_shift_ns=start_shift_ns,
+                        hold_shift_ns=0,
+                        affected_categories=affected_categories,
+                        sort_order=line_number,
+                        events=[EventSpec(0, EV_MOUSE_MOVE, MOUSE_FLAG_INITIAL_ABS, 0, x, y, 0)],
+                    )
+                )
+                if start_shift_ns and not affected_categories:
+                    warnings.append(f"{path.name}:{line_number}: shift ignored because both -m and -k remove all targets")
+                continue
 
             if normalized_label == "move":
                 coord_match = COORD_RE.search(body)

@@ -1,5 +1,5 @@
 # Relative mouse trace
+# Init: <time> at (<x>, <y>)
 # Move: <time> delta (<dx>, <dy>)
 # Left Click: <time> (<hold duration>)
 # Wheel: <time> delta <amount>
-

@@ -9,6 +9,7 @@ from codec_common import (
     EV_MOUSE_MOVE,
     EV_MOUSE_WHEEL,
     KEYBOARD_TEXT,
+    MOUSE_FLAG_INITIAL_ABS,
     MOUSE_TEXT,
     TRACE_SOURCE_C,
     TraceEvent,
@@ -65,6 +66,7 @@ def mouse_lines(events: list[TraceEvent]) -> list[str]:
 
     lines = [
         "# Relative mouse trace",
+        "# Init: <time> at (<x>, <y>)",
         "# Move: <time> delta (<dx>, <dy>)",
         "# Left Click: <time> (<hold duration>)",
         "# Wheel: <time> delta <amount>",
@@ -74,6 +76,9 @@ def mouse_lines(events: list[TraceEvent]) -> list[str]:
 
     for event in events:
         if event.event_type == EV_MOUSE_MOVE:
+            if (event.flags & MOUSE_FLAG_INITIAL_ABS) != 0:
+                lines.append(f"Init: {format_time_ns(event.t_ns)} at ({event.x}, {event.y})")
+                continue
             lines.append(f"Move: {format_time_ns(event.t_ns)} delta ({event.x}, {event.y})")
             continue
 
