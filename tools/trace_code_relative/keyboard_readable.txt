@@ -1,0 +1,4 @@
+# Keyboard trace
+# Format: Key <name>: <press time> (<hold duration>)
+# Optional: Key <name>: <press time> + <delay> -m|-k (<hold duration> + <extra hold>)
+

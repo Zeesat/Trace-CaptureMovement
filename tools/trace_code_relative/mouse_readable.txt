@@ -1,0 +1,5 @@
+# Relative mouse trace
+# Move: <time> delta (<dx>, <dy>)
+# Left Click: <time> (<hold duration>)
+# Wheel: <time> delta <amount>
+

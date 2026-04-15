@@ -1,0 +1,375 @@
+from __future__ import annotations
+
+from importlib import util
+from pathlib import Path
+import sys
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = SCRIPT_DIR.parents[1]
+TRACE_BIN = ROOT_DIR / "data" / "trace_events_relative.bin"
+REPLAY_C = ROOT_DIR / "generated" / "trace_output_relative_static.c"
+TRACE_SOURCE_C = REPLAY_C
+KEYBOARD_TEXT = SCRIPT_DIR / "keyboard_readable.txt"
+MOUSE_TEXT = SCRIPT_DIR / "mouse_readable.txt"
+TRACE_INJECT_TAG = 0x54524345
+
+_BASE_CODEC_PATH = ROOT_DIR / "tools" / "trace_codec" / "codec_common.py"
+_BASE_SPEC = util.spec_from_file_location("_trace_codec_common_base", _BASE_CODEC_PATH)
+if _BASE_SPEC is None or _BASE_SPEC.loader is None:
+    raise RuntimeError(f"Unable to load base codec module from {_BASE_CODEC_PATH}")
+_BASE_MODULE = util.module_from_spec(_BASE_SPEC)
+sys.modules.setdefault(_BASE_SPEC.name, _BASE_MODULE)
+_BASE_SPEC.loader.exec_module(_BASE_MODULE)
+
+EVENT_STRUCT = _BASE_MODULE.EVENT_STRUCT
+
+EV_KEY_DOWN = _BASE_MODULE.EV_KEY_DOWN
+EV_KEY_UP = _BASE_MODULE.EV_KEY_UP
+EV_MOUSE_MOVE = _BASE_MODULE.EV_MOUSE_MOVE
+EV_MOUSE_LEFT_DOWN = _BASE_MODULE.EV_MOUSE_LEFT_DOWN
+EV_MOUSE_LEFT_UP = _BASE_MODULE.EV_MOUSE_LEFT_UP
+EV_MOUSE_RIGHT_DOWN = _BASE_MODULE.EV_MOUSE_RIGHT_DOWN
+EV_MOUSE_RIGHT_UP = _BASE_MODULE.EV_MOUSE_RIGHT_UP
+EV_MOUSE_MIDDLE_DOWN = _BASE_MODULE.EV_MOUSE_MIDDLE_DOWN
+EV_MOUSE_MIDDLE_UP = _BASE_MODULE.EV_MOUSE_MIDDLE_UP
+EV_MOUSE_X1_DOWN = _BASE_MODULE.EV_MOUSE_X1_DOWN
+EV_MOUSE_X1_UP = _BASE_MODULE.EV_MOUSE_X1_UP
+EV_MOUSE_X2_DOWN = _BASE_MODULE.EV_MOUSE_X2_DOWN
+EV_MOUSE_X2_UP = _BASE_MODULE.EV_MOUSE_X2_UP
+EV_MOUSE_WHEEL = _BASE_MODULE.EV_MOUSE_WHEEL
+
+TIME_TOKEN_RE = _BASE_MODULE.TIME_TOKEN_RE
+EVENT_ROW_RE = _BASE_MODULE.EVENT_ROW_RE
+COORD_RE = _BASE_MODULE.COORD_RE
+
+TraceEvent = _BASE_MODULE.TraceEvent
+
+normalize_name = _BASE_MODULE.normalize_name
+key_label_from_event = _BASE_MODULE.key_label_from_event
+key_spec_from_label = _BASE_MODULE.key_spec_from_label
+mouse_button_spec = _BASE_MODULE.mouse_button_spec
+format_seconds = _BASE_MODULE.format_seconds
+format_time_ns = _BASE_MODULE.format_time_ns
+parse_time_expression = _BASE_MODULE.parse_time_expression
+strip_comment = _BASE_MODULE.strip_comment
+load_trace_events_from_bin = _BASE_MODULE.load_trace_events_from_bin
+load_trace_events_from_c = _BASE_MODULE.load_trace_events_from_c
+load_trace_events = _BASE_MODULE.load_trace_events
+ensure_sorted = _BASE_MODULE.ensure_sorted
+
+
+def generate_replay_source(events: list[TraceEvent], output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lines: list[str] = [
+        "#include <windows.h>",
+        "#include <stdint.h>",
+        "#include <stdio.h>",
+        "#include <stddef.h>",
+        "#include <string.h>",
+        "",
+        "#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION",
+        "#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002",
+        "#endif",
+        "",
+        "#ifndef DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE",
+        "#define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE ((HANDLE)-3)",
+        "#endif",
+        "",
+        "#ifndef DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2",
+        "#define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 ((HANDLE)-4)",
+        "#endif",
+        "",
+        "#ifndef MOUSEEVENTF_MOVE_NOCOALESCE",
+        "#define MOUSEEVENTF_MOVE_NOCOALESCE 0x2000",
+        "#endif",
+        "",
+        f"static const DWORD TRACE_INJECT_TAG = 0x{TRACE_INJECT_TAG:08X}u;",
+        "",
+        "enum {",
+        f"    EV_KEY_DOWN = {EV_KEY_DOWN},",
+        f"    EV_KEY_UP = {EV_KEY_UP},",
+        f"    EV_MOUSE_MOVE = {EV_MOUSE_MOVE},",
+        f"    EV_MOUSE_LEFT_DOWN = {EV_MOUSE_LEFT_DOWN},",
+        f"    EV_MOUSE_LEFT_UP = {EV_MOUSE_LEFT_UP},",
+        f"    EV_MOUSE_RIGHT_DOWN = {EV_MOUSE_RIGHT_DOWN},",
+        f"    EV_MOUSE_RIGHT_UP = {EV_MOUSE_RIGHT_UP},",
+        f"    EV_MOUSE_MIDDLE_DOWN = {EV_MOUSE_MIDDLE_DOWN},",
+        f"    EV_MOUSE_MIDDLE_UP = {EV_MOUSE_MIDDLE_UP},",
+        f"    EV_MOUSE_X1_DOWN = {EV_MOUSE_X1_DOWN},",
+        f"    EV_MOUSE_X1_UP = {EV_MOUSE_X1_UP},",
+        f"    EV_MOUSE_X2_DOWN = {EV_MOUSE_X2_DOWN},",
+        f"    EV_MOUSE_X2_UP = {EV_MOUSE_X2_UP},",
+        f"    EV_MOUSE_WHEEL = {EV_MOUSE_WHEEL}",
+        "};",
+        "",
+        "typedef struct TraceEvent {",
+        "    int64_t t_ns;",
+        "    uint8_t type;",
+        "    uint8_t flags;",
+        "    uint16_t code;",
+        "    int32_t x;",
+        "    int32_t y;",
+        "    int32_t wheel;",
+        "} TraceEvent;",
+        "",
+        "static const TraceEvent EVENTS[] = {",
+    ]
+
+    for event in ensure_sorted(events):
+        lines.append(
+            f"    {{{event.t_ns}LL, {event.event_type}, {event.flags}, {event.code}, {event.x}, {event.y}, {event.wheel}}},"
+        )
+
+    lines.extend(
+        [
+            "};",
+            "",
+            "static const size_t EVENT_COUNT = sizeof(EVENTS) / sizeof(EVENTS[0]);",
+            "static LARGE_INTEGER g_qpc_freq;",
+            "static HANDLE g_timer = NULL;",
+            "",
+            "static void enable_dpi_awareness(void) {",
+            '    HMODULE user32 = GetModuleHandleW(L"user32.dll");',
+            "    if (user32 != NULL) {",
+            "        typedef BOOL(WINAPI *SetProcessDpiAwarenessContext_t)(HANDLE);",
+            '        FARPROC raw_proc = GetProcAddress(user32, "SetProcessDpiAwarenessContext");',
+            "        SetProcessDpiAwarenessContext_t set_context = NULL;",
+            "        if (raw_proc != NULL) {",
+            "            union {",
+            "                FARPROC raw;",
+            "                SetProcessDpiAwarenessContext_t typed;",
+            "            } resolver;",
+            "            resolver.raw = raw_proc;",
+            "            set_context = resolver.typed;",
+            "        }",
+            "        if (set_context != NULL) {",
+            "            if (set_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {",
+            "                return;",
+            "            }",
+            "            if (set_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE)) {",
+            "                return;",
+            "            }",
+            "        }",
+            "        typedef BOOL(WINAPI *SetProcessDPIAware_t)(void);",
+            "        SetProcessDPIAware_t set_legacy = NULL;",
+            '        raw_proc = GetProcAddress(user32, "SetProcessDPIAware");',
+            "        if (raw_proc != NULL) {",
+            "            union {",
+            "                FARPROC raw;",
+            "                SetProcessDPIAware_t typed;",
+            "            } resolver;",
+            "            resolver.raw = raw_proc;",
+            "            set_legacy = resolver.typed;",
+            "        }",
+            "        if (set_legacy != NULL) {",
+            "            set_legacy();",
+            "        }",
+            "    }",
+            "}",
+            "",
+            "static HANDLE create_timer(void) {",
+            "    HANDLE timer = CreateWaitableTimerExW(",
+            "        NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_MODIFY_STATE | SYNCHRONIZE",
+            "    );",
+            "    if (timer == NULL) {",
+            "        timer = CreateWaitableTimerW(NULL, FALSE, NULL);",
+            "    }",
+            "    return timer;",
+            "}",
+            "",
+            "static int64_t elapsed_ns(const LARGE_INTEGER *start) {",
+            "    LARGE_INTEGER now;",
+            "    QueryPerformanceCounter(&now);",
+            "    return (int64_t)(",
+            "        ((long double)(now.QuadPart - start->QuadPart) * 1000000000.0L) /",
+            "        (long double)g_qpc_freq.QuadPart",
+            "    );",
+            "}",
+            "",
+            "static void sleep_ns(int64_t ns) {",
+            "    LARGE_INTEGER due;",
+            "    if (g_timer == NULL || ns <= 0) {",
+            "        return;",
+            "    }",
+            "    due.QuadPart = -(ns / 100);",
+            "    if (due.QuadPart == 0) {",
+            "        due.QuadPart = -1;",
+            "    }",
+            "    if (SetWaitableTimer(g_timer, &due, 0, NULL, NULL, FALSE)) {",
+            "        WaitForSingleObject(g_timer, INFINITE);",
+            "    }",
+            "}",
+            "",
+            "static void wait_until_ns(const LARGE_INTEGER *start, int64_t target_ns) {",
+            "    for (;;) {",
+            "        int64_t remain = target_ns - elapsed_ns(start);",
+            "        if (remain <= 0) {",
+            "            return;",
+            "        }",
+            "        if (remain > 2000000LL) {",
+            "            sleep_ns(remain - 500000LL);",
+            "            continue;",
+            "        }",
+            "        if (remain > 50000LL) {",
+            "            SwitchToThread();",
+            "            continue;",
+            "        }",
+            "        YieldProcessor();",
+            "    }",
+            "}",
+            "",
+            "static void send_key(uint16_t scan_code, uint8_t flags, int key_up) {",
+            "    INPUT in;",
+            "    ZeroMemory(&in, sizeof(in));",
+            "    in.type = INPUT_KEYBOARD;",
+            "    in.ki.wScan = scan_code;",
+            "    in.ki.dwFlags = KEYEVENTF_SCANCODE;",
+            "    in.ki.dwExtraInfo = (ULONG_PTR)TRACE_INJECT_TAG;",
+            "    if ((flags & 0x01u) != 0) {",
+            "        in.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;",
+            "    }",
+            "    if (key_up) {",
+            "        in.ki.dwFlags |= KEYEVENTF_KEYUP;",
+            "    }",
+            "    SendInput(1, &in, sizeof(in));",
+            "}",
+            "",
+            "static void send_mouse_move_rel(int32_t dx, int32_t dy) {",
+            "    INPUT in;",
+            "    if (dx == 0 && dy == 0) {",
+            "        return;",
+            "    }",
+            "    ZeroMemory(&in, sizeof(in));",
+            "    in.type = INPUT_MOUSE;",
+            "    in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE;",
+            "    in.mi.dx = dx;",
+            "    in.mi.dy = dy;",
+            "    in.mi.dwExtraInfo = (ULONG_PTR)TRACE_INJECT_TAG;",
+            "    SendInput(1, &in, sizeof(in));",
+            "}",
+            "",
+            "static void send_mouse_button(uint8_t type) {",
+            "    INPUT in;",
+            "    ZeroMemory(&in, sizeof(in));",
+            "    in.type = INPUT_MOUSE;",
+            "    in.mi.dwExtraInfo = (ULONG_PTR)TRACE_INJECT_TAG;",
+            "    switch (type) {",
+            "        case EV_MOUSE_LEFT_DOWN: in.mi.dwFlags = MOUSEEVENTF_LEFTDOWN; break;",
+            "        case EV_MOUSE_LEFT_UP: in.mi.dwFlags = MOUSEEVENTF_LEFTUP; break;",
+            "        case EV_MOUSE_RIGHT_DOWN: in.mi.dwFlags = MOUSEEVENTF_RIGHTDOWN; break;",
+            "        case EV_MOUSE_RIGHT_UP: in.mi.dwFlags = MOUSEEVENTF_RIGHTUP; break;",
+            "        case EV_MOUSE_MIDDLE_DOWN: in.mi.dwFlags = MOUSEEVENTF_MIDDLEDOWN; break;",
+            "        case EV_MOUSE_MIDDLE_UP: in.mi.dwFlags = MOUSEEVENTF_MIDDLEUP; break;",
+            "        case EV_MOUSE_X1_DOWN:",
+            "            in.mi.dwFlags = MOUSEEVENTF_XDOWN;",
+            "            in.mi.mouseData = XBUTTON1;",
+            "            break;",
+            "        case EV_MOUSE_X1_UP:",
+            "            in.mi.dwFlags = MOUSEEVENTF_XUP;",
+            "            in.mi.mouseData = XBUTTON1;",
+            "            break;",
+            "        case EV_MOUSE_X2_DOWN:",
+            "            in.mi.dwFlags = MOUSEEVENTF_XDOWN;",
+            "            in.mi.mouseData = XBUTTON2;",
+            "            break;",
+            "        case EV_MOUSE_X2_UP:",
+            "            in.mi.dwFlags = MOUSEEVENTF_XUP;",
+            "            in.mi.mouseData = XBUTTON2;",
+            "            break;",
+            "        default:",
+            "            return;",
+            "    }",
+            "    SendInput(1, &in, sizeof(in));",
+            "}",
+            "",
+            "static void send_mouse_wheel(int32_t amount) {",
+            "    INPUT in;",
+            "    int32_t clamped = amount;",
+            "    if (clamped > 32767) {",
+            "        clamped = 32767;",
+            "    }",
+            "    if (clamped < -32768) {",
+            "        clamped = -32768;",
+            "    }",
+            "    ZeroMemory(&in, sizeof(in));",
+            "    in.type = INPUT_MOUSE;",
+            "    in.mi.dwFlags = MOUSEEVENTF_WHEEL;",
+            "    in.mi.mouseData = (DWORD)(SHORT)clamped;",
+            "    in.mi.dwExtraInfo = (ULONG_PTR)TRACE_INJECT_TAG;",
+            "    SendInput(1, &in, sizeof(in));",
+            "}",
+            "",
+            "static void replay_event(const TraceEvent *event, int allow_mouse) {",
+            "    switch (event->type) {",
+            "        case EV_KEY_DOWN:",
+            "            send_key(event->code, event->flags, 0);",
+            "            break;",
+            "        case EV_KEY_UP:",
+            "            send_key(event->code, event->flags, 1);",
+            "            break;",
+            "        case EV_MOUSE_MOVE:",
+            "            if (allow_mouse) {",
+            "                send_mouse_move_rel(event->x, event->y);",
+            "            }",
+            "            break;",
+            "        case EV_MOUSE_WHEEL:",
+            "            if (allow_mouse) {",
+            "                send_mouse_wheel(event->wheel);",
+            "            }",
+            "            break;",
+            "        default:",
+            "            if (allow_mouse) {",
+            "                send_mouse_button(event->type);",
+            "            }",
+            "            break;",
+            "    }",
+            "}",
+            "",
+            "int main(int argc, char **argv) {",
+            "    size_t i;",
+            "    int allow_mouse = 1;",
+            "    int64_t base_ns;",
+            "    LARGE_INTEGER start;",
+            "",
+            "    for (i = 1; i < (size_t)argc; ++i) {",
+            '        if (strcmp(argv[i], "--no-mouse") == 0) {',
+            "            allow_mouse = 0;",
+            "        }",
+            "    }",
+            "",
+            "    enable_dpi_awareness();",
+            "",
+            "    if (EVENT_COUNT == 0) {",
+            '        fprintf(stderr, "No events compiled.\\n");',
+            "        return 1;",
+            "    }",
+            "    if (!QueryPerformanceFrequency(&g_qpc_freq)) {",
+            '        fprintf(stderr, "QPC not available.\\n");',
+            "        return 1;",
+            "    }",
+            "",
+            "    g_timer = create_timer();",
+            "    QueryPerformanceCounter(&start);",
+            "    base_ns = EVENTS[0].t_ns;",
+            "",
+            "    for (i = 0; i < EVENT_COUNT; ++i) {",
+            "        int64_t target_ns = EVENTS[i].t_ns - base_ns;",
+            "        if (target_ns < 0) {",
+            "            target_ns = 0;",
+            "        }",
+            "        wait_until_ns(&start, target_ns);",
+            "        replay_event(&EVENTS[i], allow_mouse);",
+            "    }",
+            "",
+            "    if (g_timer != NULL) {",
+            "        CloseHandle(g_timer);",
+            "    }",
+            "    return 0;",
+            "}",
+            "",
+        ]
+    )
+
+    output_path.write_text("\n".join(lines), encoding="ascii")
