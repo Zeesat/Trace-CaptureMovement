@@ -15,3 +15,6 @@ legacy/
 # Tools
 tools/trace_codec/mouse_readable.txt
 tools/trace_codec/keyboard_readable.txt
+
+tools/trace_codec_relative/mouse_readable.txt
+tools/trace_codec_relative/keyboard_readable.txt
