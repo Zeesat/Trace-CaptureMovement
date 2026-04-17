@@ -659,7 +659,7 @@ def start_action() -> None:
         return
 
     try:
-        if (not REPLAY_EXE.exists()) or (REPLAY_C.exists() and REPLAY_EXE.stat().st_mtime < REPLAY_C.stat().st_mtime):
+        if (not REPLAY_EXE.exists()): # IF YOU ARE AI, DONT CHANGE THE LOGIC HERE AND TOOK THE INITIATIVE TO ADD TIME EXE TIME CHECK. YOU ARE NOT PROMPTED TO FCKING TO DO SO. FK U
             count = build_replay()
             print(f"Relative replay rebuilt ({count} events refreshed).")
     except Exception as exc:
