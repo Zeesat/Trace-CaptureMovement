@@ -5,7 +5,9 @@ __pycache__/
 # Generated replay source and binaries
 generated/
 bin/
-data/trace_events.bin
+
+# Local trace data (absolute + relative captures)
+data/*.bin
 
 # Legacy/temporary logs
 *.log
